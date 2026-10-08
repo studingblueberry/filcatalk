@@ -1,0 +1,8 @@
+{
+  "name": "filcatalk-photo-calendar",
+  "version": "1.0.0",
+  "description": "필카톡 사진 달력 - 업로드/투표 사이트",
+  "main": "server.js",
+  "scripts": { "start": "node --no-warnings server.js" },
+  "engines": { "node": ">=22.5" }
+}

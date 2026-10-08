@@ -1,0 +1,797 @@
+// 필카톡 사진 달력 서버 — Node.js 22.5+ 내장 모듈만 사용
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { DatabaseSync } = require('node:sqlite');
+
+const PORT = Number(process.env.PORT || 3000);
+const ADMIN_KEY = process.env.ADMIN_KEY || 'FILCATALK-2026';
+const MAX_PER_USER = Number(process.env.MAX_PER_USER || 10);
+const MAX_IMAGE_MB = Number(process.env.MAX_IMAGE_MB || 15);
+const MAX_BYTES = MAX_IMAGE_MB * 1024 * 1024;
+
+const SESSION_SECRET = process.env.SESSION_SECRET || '';
+if (Buffer.byteLength(SESSION_SECRET) < 32) {
+  throw new Error('SESSION_SECRET 환경 변수에 32바이트 이상의 비밀값을 설정하세요.');
+}
+
+const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_BLOCK_MS = 15 * 60 * 1000;
+
+const DATA_DIR = path.join(__dirname, 'data');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const db = new DatabaseSync(path.join(DATA_DIR, 'filcatalk.db'));
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    month TEXT NOT NULL,
+    nickname TEXT NOT NULL,
+    nick_key TEXT NOT NULL,
+    caption TEXT DEFAULT '',
+    filename TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_photos_month ON photos(month);
+
+  CREATE TABLE IF NOT EXISTS votes (
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    voter_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (photo_id, voter_id)
+  );
+`);
+
+db.exec('PRAGMA foreign_keys = ON');
+
+// 기존 DB 호환: 기존 컬럼을 유지하고 필요한 컬럼만 추가합니다.
+const photoColumns = db.prepare('PRAGMA table_info(photos)').all().map((c) => c.name);
+if (!photoColumns.includes('owner_id')) {
+  db.exec("ALTER TABLE photos ADD COLUMN owner_id TEXT DEFAULT ''");
+}
+if (!photoColumns.includes('thumb')) {
+  db.exec("ALTER TABLE photos ADD COLUMN thumb TEXT DEFAULT ''");
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    nickname TEXT NOT NULL,
+    nick_key TEXT NOT NULL UNIQUE,
+    pin_salt TEXT NOT NULL,
+    pin_hash TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS login_attempts (
+    bucket TEXT PRIMARY KEY,
+    count INTEGER NOT NULL DEFAULT 0,
+    window_started INTEGER NOT NULL,
+    blocked_until INTEGER NOT NULL DEFAULT 0
+  );
+`);
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.jpg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+};
+
+const send = (res, code, obj) => {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+};
+
+const isAdmin = (req) => {
+  const supplied = Buffer.from(String(req.headers['x-admin-key'] || ''));
+  const expected = Buffer.from(ADMIN_KEY);
+  return supplied.length === expected.length &&
+    crypto.timingSafeEqual(supplied, expected);
+};
+
+const readBody = (req, limit) => new Promise((resolve, reject) => {
+  let size = 0;
+  const chunks = [];
+  let rejected = false;
+
+  req.on('data', (chunk) => {
+    if (rejected) return;
+    size += chunk.length;
+
+    if (size > limit) {
+      rejected = true;
+      reject(new Error('too_large'));
+      req.resume();
+      return;
+    }
+
+    chunks.push(chunk);
+  });
+
+  req.on('end', () => {
+    if (!rejected) resolve(Buffer.concat(chunks));
+  });
+
+  req.on('error', (error) => {
+    if (!rejected) reject(error);
+  });
+});
+
+const readJson = async (req) => {
+  const buffer = await readBody(req, 64 * 1024);
+  try {
+    return JSON.parse(buffer.toString() || '{}');
+  } catch {
+    throw new Error('bad_json');
+  }
+};
+
+const validMonth = (month) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month || '');
+
+const cleanNick = (value) =>
+  String(value || '')
+    .normalize('NFKC')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .slice(0, 20);
+
+const nickKeyOf = (nickname) =>
+  cleanNick(nickname).toLocaleLowerCase('ko-KR');
+
+const hdr = (req, name) => {
+  try {
+    return decodeURIComponent(String(req.headers[name] || ''));
+  } catch {
+    return '';
+  }
+};
+
+function getCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+
+    if (part.slice(0, i).trim() === name) {
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return '';
+      }
+    }
+  }
+  return '';
+}
+
+const sign = (payload) =>
+  crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest();
+
+function setSession(res, userId) {
+  const payload = Buffer.from(JSON.stringify({
+    sub: userId,
+    exp: Date.now() + SESSION_MS,
+  })).toString('base64url');
+
+  const signature = sign(payload).toString('base64url');
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+
+  res.setHeader(
+    'Set-Cookie',
+    `session=${payload}.${signature}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_MS / 1000)}${secure}`
+  );
+}
+
+function clearSession(res) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`
+  );
+}
+
+function authenticatedUser(req) {
+  const token = getCookie(req, 'session');
+  const separator = token.lastIndexOf('.');
+  if (separator < 1) return null;
+
+  const payload = token.slice(0, separator);
+  let suppliedSignature;
+
+  try {
+    suppliedSignature = Buffer.from(token.slice(separator + 1), 'base64url');
+  } catch {
+    return null;
+  }
+
+  const expectedSignature = sign(payload);
+  if (suppliedSignature.length !== expectedSignature.length) return null;
+  if (!crypto.timingSafeEqual(suppliedSignature, expectedSignature)) return null;
+
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    if (!data.sub || !Number.isFinite(data.exp) || data.exp < Date.now()) return null;
+
+    return db.prepare(
+      'SELECT id, nickname, nick_key FROM users WHERE id = ?'
+    ).get(data.sub) || null;
+  } catch {
+    return null;
+  }
+}
+
+function requireUser(req, res) {
+  const user = authenticatedUser(req);
+  if (!user) send(res, 401, { error: '먼저 로그인해주세요.' });
+  return user;
+}
+
+const pinHash = (pin, salt) => crypto.scryptSync(pin, salt, 64);
+
+function attemptBucket(req, nickKey) {
+  const ip = req.socket.remoteAddress || 'unknown';
+  return crypto.createHmac('sha256', SESSION_SECRET)
+    .update(`${nickKey}\n${ip}`)
+    .digest('hex');
+}
+
+function isLoginBlocked(bucket) {
+  const row = db.prepare(
+    'SELECT blocked_until FROM login_attempts WHERE bucket = ?'
+  ).get(bucket);
+
+  return Boolean(row && row.blocked_until > Date.now());
+}
+
+function failLogin(bucket) {
+  const now = Date.now();
+  const row = db.prepare(
+    'SELECT count, window_started FROM login_attempts WHERE bucket = ?'
+  ).get(bucket);
+
+  const inWindow = row && now - row.window_started < LOGIN_WINDOW_MS;
+  const count = inWindow ? row.count + 1 : 1;
+  const windowStarted = inWindow ? row.window_started : now;
+  const blockedUntil = count >= LOGIN_MAX_ATTEMPTS
+    ? now + LOGIN_BLOCK_MS
+    : 0;
+
+  db.prepare(`
+    INSERT INTO login_attempts(bucket, count, window_started, blocked_until)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(bucket) DO UPDATE SET
+      count = excluded.count,
+      window_started = excluded.window_started,
+      blocked_until = excluded.blocked_until
+  `).run(bucket, count, windowStarted, blockedUntil);
+}
+
+// 파일 확장자가 아니라 이미지의 실제 매직 바이트를 검사합니다.
+function sniff(buffer) {
+  if (
+    buffer.length > 12 &&
+    buffer[0] === 0xff &&
+    buffer[1] === 0xd8 &&
+    buffer[2] === 0xff
+  ) {
+    return 'jpg';
+  }
+
+  if (
+    buffer.length > 12 &&
+    buffer.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    )
+  ) {
+    return 'png';
+  }
+
+  if (
+    buffer.length > 12 &&
+    buffer.subarray(0, 4).toString() === 'RIFF' &&
+    buffer.subarray(8, 12).toString() === 'WEBP'
+  ) {
+    return 'webp';
+  }
+
+  return null;
+}
+
+const urlOf = (filename) => '/uploads/' + filename;
+
+function listPhotos(month, voterId, admin, ownerId) {
+  const rows = db.prepare(`
+    SELECT
+      p.id,
+      p.nickname,
+      p.caption,
+      p.filename,
+      p.thumb,
+      p.owner_id,
+      (SELECT COUNT(*) FROM votes v WHERE v.photo_id = p.id) AS votes,
+      EXISTS(
+        SELECT 1 FROM votes v
+        WHERE v.photo_id = p.id AND v.voter_id = ?
+      ) AS voted
+    FROM photos p
+    WHERE p.month = ?
+    ORDER BY p.id DESC
+  `).all(voterId || '', month);
+
+  return rows.map((row) => {
+    const photo = {
+      id: row.id,
+      nickname: row.nickname,
+      caption: row.caption,
+      url: urlOf(row.filename),
+      thumb: row.thumb ? urlOf(row.thumb) : urlOf(row.filename),
+      voted: Boolean(row.voted),
+      own: Boolean(ownerId) && row.owner_id === ownerId,
+    };
+
+    if (admin) photo.votes = row.votes;
+    return photo;
+  });
+}
+
+function removePhoto(id) {
+  const row = db.prepare(
+    'SELECT filename, thumb FROM photos WHERE id = ?'
+  ).get(id);
+
+  if (!row) return;
+
+  db.prepare('DELETE FROM photos WHERE id = ?').run(id);
+
+  for (const filename of [row.filename, row.thumb]) {
+    if (filename) {
+      fs.rm(path.join(UPLOAD_DIR, filename), () => {});
+    }
+  }
+}
+
+async function api(req, res, url) {
+  const pathname = url.pathname;
+  const method = req.method;
+
+  if (pathname === '/api/config' && method === 'GET') {
+    return send(res, 200, {
+      maxPerUser: MAX_PER_USER,
+      maxImageMB: MAX_IMAGE_MB,
+    });
+  }
+
+  if (pathname === '/api/admin/check' && method === 'GET') {
+    const admin = isAdmin(req);
+    return send(res, admin ? 200 : 401, { admin });
+  }
+
+  if (pathname === '/api/me' && method === 'GET') {
+    const user = authenticatedUser(req);
+    return send(res, 200, {
+      user: user ? { id: user.id, nickname: user.nickname } : null,
+    });
+  }
+
+  if (pathname === '/api/register' && method === 'POST') {
+    const body = await readJson(req);
+    const nickname = cleanNick(body.nickname);
+    const nickKey = nickKeyOf(nickname);
+    const pin = String(body.pin || '');
+
+    if (!nickname) {
+      return send(res, 400, { error: '닉네임을 입력해주세요.' });
+    }
+    if (!/^\d{4}$/.test(pin)) {
+      return send(res, 400, { error: '비밀번호는 숫자 4자리로 입력해주세요.' });
+    }
+
+    const id = crypto.randomUUID();
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = pinHash(pin, salt).toString('hex');
+
+    try {
+      db.prepare(`
+        INSERT INTO users(id, nickname, nick_key, pin_salt, pin_hash)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(id, nickname, nickKey, salt, hash);
+    } catch (error) {
+      if (String(error.message).includes('UNIQUE')) {
+        return send(res, 409, { error: '이미 사용 중인 닉네임입니다.' });
+      }
+      throw error;
+    }
+
+    setSession(res, id);
+    return send(res, 201, { user: { id, nickname } });
+  }
+
+  if (pathname === '/api/login' && method === 'POST') {
+    const body = await readJson(req);
+    const nickname = cleanNick(body.nickname);
+    const nickKey = nickKeyOf(nickname);
+    const pin = String(body.pin || '');
+    const bucket = attemptBucket(req, nickKey);
+
+    if (isLoginBlocked(bucket)) {
+      return send(res, 429, {
+        error: '로그인 시도가 제한되었습니다. 잠시 후 다시 시도해주세요.',
+      });
+    }
+
+    const user = db.prepare(`
+      SELECT id, nickname, pin_salt, pin_hash
+      FROM users
+      WHERE nick_key = ?
+    `).get(nickKey);
+
+    // 닉네임이 없는 경우에도 PIN 해시 계산을 수행합니다.
+    const salt = user?.pin_salt || 'unknown-user-salt';
+    const expected = user
+      ? Buffer.from(user.pin_hash, 'hex')
+      : pinHash('0000', salt);
+    const candidate = pinHash(/^\d{4}$/.test(pin) ? pin : '0000', salt);
+
+    const valid = Boolean(user) &&
+      expected.length === candidate.length &&
+      crypto.timingSafeEqual(expected, candidate);
+
+    if (!valid) {
+      failLogin(bucket);
+      return send(res, 401, {
+        error: '닉네임 또는 비밀번호가 올바르지 않습니다.',
+      });
+    }
+
+    db.prepare('DELETE FROM login_attempts WHERE bucket = ?').run(bucket);
+    setSession(res, user.id);
+    return send(res, 200, { user: { id: user.id, nickname: user.nickname } });
+  }
+
+  if (pathname === '/api/logout' && method === 'POST') {
+    clearSession(res);
+    return send(res, 200, { ok: true });
+  }
+
+  if (pathname === '/api/photos' && method === 'GET') {
+    const month = url.searchParams.get('month');
+    if (!validMonth(month)) {
+      return send(res, 400, { error: '올바른 월이 아닙니다.' });
+    }
+
+    const admin = isAdmin(req);
+    const user = authenticatedUser(req);
+    const voterId = user?.id || '';
+    const ownerId = user?.id || '';
+
+    const photos = listPhotos(month, voterId, admin, ownerId);
+    const mine = user
+      ? db.prepare('SELECT COUNT(*) AS c FROM photos WHERE owner_id = ?')
+          .get(user.id).c
+      : 0;
+
+    return send(res, 200, {
+      photos,
+      mine,
+      admin,
+      user: user ? { id: user.id, nickname: user.nickname } : null,
+    });
+  }
+
+  // 사진 원본 업로드. 닉네임과 owner_id는 서버 세션에서 결정합니다.
+  if (pathname === '/api/photos' && method === 'POST') {
+    const user = requireUser(req, res);
+    if (!user) {
+      req.resume();
+      return;
+    }
+
+    const month = hdr(req, 'x-month');
+    if (!validMonth(month)) {
+      req.resume();
+      return send(res, 400, { error: '올바른 월이 아닙니다.' });
+    }
+
+    if (Number(req.headers['content-length'] || 0) > MAX_BYTES) {
+      req.resume();
+      return send(res, 413, {
+        error: `사진은 장당 ${MAX_IMAGE_MB}MB까지 올릴 수 있어요.`,
+      });
+    }
+
+    const count = db.prepare(
+      'SELECT COUNT(*) AS c FROM photos WHERE owner_id = ?'
+    ).get(user.id).c;
+
+    if (count >= MAX_PER_USER) {
+      req.resume();
+      return send(res, 409, {
+        error: `한 사람당 전체 ${MAX_PER_USER}장까지만 올릴 수 있어요.`,
+      });
+    }
+
+    const buffer = await readBody(req, MAX_BYTES);
+    const extension = sniff(buffer);
+
+    if (!extension) {
+      return send(res, 400, { error: 'JPG, PNG, WEBP 이미지만 올릴 수 있어요.' });
+    }
+
+    const filename = crypto.randomUUID() + '.' + extension;
+    fs.writeFileSync(path.join(UPLOAD_DIR, filename), buffer);
+
+    try {
+      const info = db.prepare(`
+        INSERT INTO photos
+          (month, nickname, nick_key, caption, filename, owner_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        month,
+        user.nickname,
+        user.nick_key,
+        '',
+        filename,
+        user.id
+      );
+
+      return send(res, 201, {
+        id: Number(info.lastInsertRowid),
+        mine: count + 1,
+      });
+    } catch (error) {
+      fs.rm(path.join(UPLOAD_DIR, filename), () => {});
+      throw error;
+    }
+  }
+
+  let match;
+
+  // 로그인한 사진 소유자만 해당 사진의 썸네일을 추가할 수 있습니다.
+  if ((match = /^\/api\/photos\/(\d+)\/thumb$/.exec(pathname)) &&
+      method === 'POST') {
+    const user = requireUser(req, res);
+    if (!user) {
+      req.resume();
+      return;
+    }
+
+    const id = Number(match[1]);
+    const row = db.prepare(
+      'SELECT owner_id, thumb FROM photos WHERE id = ?'
+    ).get(id);
+
+    if (!row) {
+      req.resume();
+      return send(res, 404, { error: '사진을 찾을 수 없어요.' });
+    }
+    if (row.owner_id !== user.id || row.thumb) {
+      req.resume();
+      return send(res, 403, { error: '권한이 없어요.' });
+    }
+
+    const buffer = await readBody(req, 2 * 1024 * 1024);
+    if (sniff(buffer) !== 'jpg') {
+      return send(res, 400, { error: '썸네일은 JPG만 가능해요.' });
+    }
+
+    const filename = 't-' + crypto.randomUUID() + '.jpg';
+    fs.writeFileSync(path.join(UPLOAD_DIR, filename), buffer);
+
+    try {
+      db.prepare('UPDATE photos SET thumb = ? WHERE id = ? AND owner_id = ?')
+        .run(filename, id, user.id);
+    } catch (error) {
+      fs.rm(path.join(UPLOAD_DIR, filename), () => {});
+      throw error;
+    }
+
+    return send(res, 200, { ok: true });
+  }
+
+  // 로그인 계정당 사진별 한 표. 자신의 사진에는 투표할 수 없습니다.
+  if ((match = /^\/api\/photos\/(\d+)\/vote$/.exec(pathname)) &&
+      method === 'POST') {
+    const user = requireUser(req, res);
+    if (!user) return;
+
+    const id = Number(match[1]);
+    const photo = db.prepare(
+      'SELECT owner_id FROM photos WHERE id = ?'
+    ).get(id);
+
+    if (!photo) {
+      return send(res, 404, { error: '사진을 찾을 수 없어요.' });
+    }
+    if (photo.owner_id && photo.owner_id === user.id) {
+      return send(res, 403, { error: '내 사진에는 투표할 수 없어요.' });
+    }
+
+    const had = db.prepare(
+      'SELECT 1 FROM votes WHERE photo_id = ? AND voter_id = ?'
+    ).get(id, user.id);
+
+    if (had) {
+      db.prepare(
+        'DELETE FROM votes WHERE photo_id = ? AND voter_id = ?'
+      ).run(id, user.id);
+    } else {
+      db.prepare(
+        'INSERT INTO votes (photo_id, voter_id) VALUES (?, ?)'
+      ).run(id, user.id);
+    }
+
+    return send(res, 200, { voted: !had });
+  }
+
+  // 관리자는 모든 사진을 삭제할 수 있고, 일반 사용자는 본인 사진만 삭제합니다.
+  if ((match = /^\/api\/photos\/(\d+)$/.exec(pathname)) &&
+      method === 'DELETE') {
+    const id = Number(match[1]);
+    const admin = isAdmin(req);
+    const user = authenticatedUser(req);
+    const row = db.prepare(
+      'SELECT owner_id FROM photos WHERE id = ?'
+    ).get(id);
+
+    if (!row) return send(res, 200, { ok: true });
+
+    const isOwner = Boolean(user) && row.owner_id === user.id;
+    if (!admin && !isOwner) {
+      return send(res, 403, { error: '본인이 올린 사진만 삭제할 수 있어요.' });
+    }
+
+    removePhoto(id);
+    return send(res, 200, { ok: true });
+  }
+
+  // 관리자: 월별 TOP 3 (동점은 같은 순위로 묶음)
+  if (pathname === '/api/admin/ranking' && method === 'GET') {
+    if (!isAdmin(req)) {
+      return send(res, 401, { error: '관리자 키가 필요해요.' });
+    }
+
+    const rows = db.prepare(`
+      SELECT
+        p.id,
+        p.month,
+        p.nickname,
+        p.caption,
+        p.filename,
+        p.thumb,
+        (SELECT COUNT(*) FROM votes v WHERE v.photo_id = p.id) AS votes
+      FROM photos p
+      ORDER BY p.month DESC, votes DESC, p.id
+    `).all();
+
+    const byMonth = new Map();
+
+    for (const row of rows) {
+      const group = byMonth.get(row.month) || {
+        month: row.month,
+        total: 0,
+        ranks: [],
+      };
+
+      group.total++;
+
+      if (row.votes > 0) {
+        let rank = group.ranks.find((item) => item.votes === row.votes);
+
+        if (!rank && group.ranks.length < 3) {
+          rank = {
+            rank: group.ranks.length + 1,
+            votes: row.votes,
+            photos: [],
+          };
+          group.ranks.push(rank);
+        }
+
+        if (rank) {
+          rank.photos.push({
+            id: row.id,
+            nickname: row.nickname,
+            caption: row.caption,
+            url: urlOf(row.filename),
+            thumb: row.thumb ? urlOf(row.thumb) : urlOf(row.filename),
+            votes: row.votes,
+          });
+        }
+      }
+
+      byMonth.set(row.month, group);
+    }
+
+    return send(res, 200, { months: [...byMonth.values()] });
+  }
+
+  return send(res, 404, { error: 'not found' });
+}
+
+function serveStatic(res, base, relativePath) {
+  const root = path.resolve(base);
+  const file = path.resolve(root, relativePath);
+
+  if (file !== root && !file.startsWith(root + path.sep)) {
+    res.writeHead(403);
+    return res.end();
+  }
+
+  fs.readFile(file, (error, data) => {
+    if (error) {
+      res.writeHead(404);
+      return res.end('Not found');
+    }
+
+    const extension = path.extname(file).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[extension] || 'application/octet-stream',
+      'Cache-Control': base === UPLOAD_DIR
+        ? 'public, max-age=604800, immutable'
+        : 'no-cache',
+    });
+    res.end(data);
+  });
+}
+
+http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+
+  try {
+    if (url.pathname.startsWith('/api/')) {
+      return await api(req, res, url);
+    }
+
+    if (url.pathname.startsWith('/uploads/')) {
+      return serveStatic(res, UPLOAD_DIR, url.pathname.slice('/uploads/'.length));
+    }
+
+    if (url.pathname === '/admin') {
+      url.pathname = '/admin.html';
+    }
+
+    return serveStatic(
+      res,
+      PUBLIC_DIR,
+      url.pathname === '/' ? 'index.html' : url.pathname.slice(1)
+    );
+  } catch (error) {
+    const code = error.message === 'too_large'
+      ? 413
+      : error.message === 'bad_json'
+        ? 400
+        : 500;
+
+    if (!res.headersSent) {
+      send(res, code, {
+        error: code === 413
+          ? `파일이 너무 커요. (최대 ${MAX_IMAGE_MB}MB)`
+          : code === 500
+            ? '서버 오류가 발생했어요.'
+            : '요청이 올바르지 않아요.',
+      });
+    }
+
+    if (code === 500) console.error(error);
+  }
+}).listen(PORT, () => {
+  console.log(`필카톡 서버 실행 중: http://localhost:${PORT} (관리자 페이지: /admin)`);
+
+  if (!process.env.ADMIN_KEY) {
+    console.log('⚠ ADMIN_KEY 환경변수를 설정해 기본 키를 변경하세요.');
+  }
+  if (!process.env.SESSION_SECRET) {
+    // 시작 전 검증에서 종료되지만 환경변수 설정 방법을 로그에도 안내합니다.
+    console.log('⚠ SESSION_SECRET 환경변수를 설정하세요.');
+  }
+});

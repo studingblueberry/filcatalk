@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#eee5c9">
+<title>필름사진카톡 · 필카톡 사진 달력</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="shell">
+  <div class="topline">
+    <div class="brand"><span class="mark">필</span><span>FILM PHOTO CLUB&nbsp; / &nbsp;SINCE 2018</span></div>
+    <span class="live">●&nbsp; ARCHIVE OPEN</span>
+  </div>
+  <header class="hero">
+    <div><div class="kicker">필름사진카톡 · 필카톡 사진 달력</div><h1>한 달의 빛을<br><span>모아 두는 곳.</span></h1></div>
+    <div class="hero-note"><b>MONTHLY PHOTO CALENDAR</b>이달의 컷을 올리고, 마음에 드는 사진에 투표해 우리의 달력을 완성합니다.</div>
+  </header>
+
+  <section class="deck"><div class="stamp">EST. 2018 · 35mm</div>
+    <div class="deck-inner">
+      <aside class="side">
+        <div class="side-head">ARCHIVE INDEX &nbsp; / &nbsp;월별 목록</div>
+        <div class="yearline"><button id="prevYear" aria-label="이전 연도">‹</button><strong id="year"></strong><button id="nextYear" aria-label="다음 연도">›</button></div>
+        <nav class="month-list" id="strip" aria-label="월 선택"></nav>
+        <div class="side-bottom">
+          <div class="txt">필름 한 롤을 현상하듯<br>천천히 넘겨 보세요.<br></div>
+          <span class="code">12 ROLLS / ONE YEAR</span>
+          <div class="admin-box">
+            <span class="adm-tag" id="adminTag" hidden>● ADMIN MODE</span>
+            <button class="ghost" id="adminBtn" type="button">🔑 관리자 키</button>
+            <a class="ghost on" id="winBtn" href="/admin.html" hidden>관리자 페이지 · TOP 3</a>
+            <button class="ghost" id="logout" type="button" hidden>나가기</button>
+          </div>
+        </div>
+      </aside>
+
+      <section class="content">
+        <div class="content-top">
+          <div class="month-title"><small id="monthCode">ROLL 01</small><h2><span id="monthNum">01</span><em>월</em></h2></div>
+          <div class="slide-controls"><button id="prev" aria-label="이전 달">←</button><button id="next" aria-label="다음 달">→</button></div>
+        </div>
+        <div class="meta-row">
+          <form class="auth-form" id="authForm">
+            <label for="nick">닉네임</label><input id="nick" name="nickname" type="text" maxlength="20" placeholder="동호회에서 쓰는 이름" autocomplete="username" required>
+            <label for="pin">비밀번호</label><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="숫자 4자리" autocomplete="current-password" required>
+            <button class="ghost" id="loginBtn" type="submit">로그인</button>
+            <button class="ghost" id="registerBtn" type="button">처음이라면 가입</button>
+            <button class="ghost" id="accountLogout" type="button" hidden>계정 로그아웃</button>
+            <span id="signedIn" class="signed-in" hidden></span>
+          </form>
+          <div class="quota">내 업로드 <b id="mine">0</b> / <span id="max">10</span> FRAMES</div>
+        </div>
+        <div class="page-body" id="pageBody"><div class="gallery" id="grid"></div></div>
+        <div class="footer-row">
+          <span id="photoCount">0 FRAMES DEVELOPED</span>
+          <button class="add-btn" id="pick" type="button">＋&nbsp; 사진 업로드</button>
+        </div>
+        <input id="file" type="file" accept="image/jpeg,image/png,image/webp" multiple>
+      </section>
+    </div>
+  </section>
+  <div class="bottomnote">사진은 원본 화질로 서버에 보관되고(장당 15MB까지), 득표수는 관리자에게만 공개됩니다. 사진 업로드·투표·삭제는 로그인한 계정으로 이용할 수 있어요.</div>
+</main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<dialog id="viewer"><img id="big" alt=""></dialog>
+<dialog id="keyDlg" class="key">
+  <form method="dialog">
+    <label>ADMIN KEY<input id="keyInput" type="password" autocomplete="off"></label>
+    <div><button class="add-btn" value="ok">확인</button><button class="ghost" value="cancel" formnovalidate>취소</button></div>
+  </form>
+</dialog>
+
+<script>
+const $=(s)=>document.querySelector(s);
+const state={month:new Date().toISOString().slice(0,7),max:10,maxMB:15,admin:sessionStorage.getItem('adminKey')||''};
+let currentUser=null;
+let toastTimer;
+const say=(t)=>{const e=$('#toast');e.textContent=t||'';e.classList.toggle('show',!!t);clearTimeout(toastTimer);if(t)toastTimer=setTimeout(()=>e.classList.remove('show'),2800)};
+const headers=()=>state.admin?{'X-Admin-Key':state.admin}:{};
+async function call(url,opt={}){
+  const r=await fetch(url,{...opt,credentials:'same-origin',headers:{'Content-Type':'application/json',...headers(),...(opt.headers||{})}});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw Object.assign(new Error(d.error||'오류가 발생했어요.'),{status:r.status});
+  return d;
+}
+function showAccount(user){
+  currentUser=user;const on=Boolean(user);$('#nick').readOnly=on;
+  $('#signedIn').hidden=!on;$('#signedIn').textContent=on?`${user.nickname} 로그인 중`:'';
+  $('#accountLogout').hidden=!on;$('#loginBtn').hidden=on;$('#registerBtn').hidden=on;
+  if(user)$('#nick').value=user.nickname;
+}
+async function authenticate(mode){
+  const nickname=$('#nick').value.trim(),pin=$('#pin').value;
+  if(!nickname){say('닉네임을 입력해주세요.');$('#nick').focus();return}
+  if(!/^[0-9]{4}$/.test(pin)){say('비밀번호는 숫자 4자리로 입력해주세요.');$('#pin').focus();return}
+  try{const d=await call(`/api/${mode}`,{method:'POST',body:JSON.stringify({nickname,pin})});$('#pin').value='';showAccount(d.user);say(mode==='register'?'가입하고 로그인했습니다.':'로그인했습니다.');load()}
+  catch(e){say(e.message)}
+}
+$('#authForm').addEventListener('submit',(e)=>{e.preventDefault();authenticate('login')});
+$('#registerBtn').onclick=()=>authenticate('register');
+$('#accountLogout').onclick=async()=>{try{await call('/api/logout',{method:'POST',body:'{}'});showAccount(null);$('#pin').value='';say('계정에서 로그아웃했습니다.');load()}catch(e){say(e.message)}};
+async function restoreLogin(){try{const d=await call('/api/me');showAccount(d.user)}catch{showAccount(null)}}
+const mLabel=(m)=>`${m.slice(0,4)}년 ${+m.slice(5)}월`;
+const setMonth=(y,m)=>{state.month=`${y}-${String(m).padStart(2,'0')}`;load()};
+function shift(n){const [y,m]=state.month.split('-').map(Number);const d=new Date(y,m-1+n,1);setMonth(d.getFullYear(),d.getMonth()+1);
+  const b=$('#pageBody');b.style.animation='none';void b.offsetWidth;b.style.animation=''}
+$('#prev').onclick=()=>shift(-1);$('#next').onclick=()=>shift(1);
+$('#prevYear').onclick=()=>setMonth(+state.month.slice(0,4)-1,+state.month.slice(5));
+$('#nextYear').onclick=()=>setMonth(+state.month.slice(0,4)+1,+state.month.slice(5));
+document.addEventListener('keydown',(e)=>{if(/INPUT|DIALOG/.test(e.target.tagName)||document.querySelector('dialog[open]'))return;
+  if(e.key==='ArrowRight')shift(1);if(e.key==='ArrowLeft')shift(-1)});
+let sx=0;const content=$('.content');
+content.addEventListener('touchstart',(e)=>sx=e.changedTouches[0].screenX,{passive:true});
+content.addEventListener('touchend',(e)=>{const d=e.changedTouches[0].screenX-sx;if(Math.abs(d)>80)shift(d<0?1:-1)},{passive:true});
+
+function drawStrip(){
+  const y=state.month.slice(0,4),s=$('#strip');s.replaceChildren();
+  for(let i=1;i<=12;i++){const m=`${y}-${String(i).padStart(2,'0')}`;const b=document.createElement('button');
+    b.className='month'+(m===state.month?' active':'');b.textContent=String(i).padStart(2,'0')+'월';
+    b.setAttribute('aria-pressed',m===state.month);b.onclick=()=>{state.month=m;load()};s.append(b)}
+}
+
+async function load(){
+  $('#year').textContent=state.month.slice(0,4);
+  $('#monthNum').textContent=state.month.slice(5);$('#monthCode').textContent='ROLL '+state.month.slice(5);
+  drawStrip();
+  try{
+    const d=await call(`/api/photos?month=${state.month}`);
+    $('#mine').textContent=d.mine;
+    if(state.admin&&!d.admin){state.admin='';sessionStorage.removeItem('adminKey')}
+    showAccount(d.user||null);
+    render(d.photos,d.admin);
+  }catch(e){say(e.message)}
+}
+
+function render(photos,admin){
+  const g=$('#grid');g.replaceChildren();
+  $('#adminTag').hidden=$('#winBtn').hidden=$('#logout').hidden=!admin;$('#adminBtn').hidden=admin;
+  $('#photoCount').textContent=`${photos.length} FRAME${photos.length===1?'':'S'} DEVELOPED`;
+  if(!photos.length){
+    const e=document.createElement('div');e.className='empty-tile';
+    e.innerHTML='<div><div class="sun">◉</div><strong>이 달의 첫 번째 프레임</strong><small>사진을 올려 기록을 시작하세요</small></div>';
+    g.append(e);return}
+  const top=admin?Math.max(...photos.map(p=>p.votes)):0;
+  photos.forEach((p,i)=>{
+    const f=document.createElement('article');const isTop=admin&&top>0&&p.votes===top;f.className='photo'+(isTop?' top':'');
+    const box=document.createElement('div');box.className='img';
+    const img=document.createElement('img');img.src=p.thumb;img.loading='lazy';img.decoding='async';img.alt=`${p.nickname}님의 사진`+(p.caption?`: ${p.caption}`:'');
+    img.onclick=()=>{$('#big').src=p.url;$('#viewer').showModal()};box.append(img);f.append(box);
+    if(admin){const c=document.createElement('span');c.className='chip';c.textContent=(isTop?'★ ':'')+p.votes+' VOTES';f.append(c)}
+    const row=document.createElement('div');row.className='row';
+    const who=document.createElement('span');who.className='who';who.textContent=p.nickname;
+    const v=document.createElement('button');v.className='vote';v.setAttribute('aria-pressed',p.voted);v.textContent=p.voted?'♥ VOTED':'♡ VOTE';
+    v.onclick=()=>vote(p.id);row.append(who,v);f.append(row);
+    if(p.caption){const c=document.createElement('div');c.className='cap';c.textContent=p.caption;f.append(c)}
+    if(admin||p.own){const d=document.createElement('button');d.className='del';d.textContent=p.own&&!admin?'내 사진 삭제':'사진 삭제';
+      d.onclick=async()=>{if(!confirm('이 사진을 삭제할까요? 되돌릴 수 없어요.'))return;
+        try{await call('/api/photos/'+p.id,{method:'DELETE'});say('사진을 삭제했습니다');load()}catch(e){say(e.message)}};f.append(d)}
+    g.append(f);
+  });
+}
+
+async function vote(id){
+  if(!currentUser){say('투표하려면 먼저 로그인해주세요.');$('#nick').focus();return}
+  try{await call(`/api/photos/${id}/vote`,{method:'POST',body:'{}'});load()}catch(e){say(e.message)}
+}
+
+function makeThumb(file){return new Promise((ok)=>{
+  const img=new Image(),u=URL.createObjectURL(file);
+  img.onload=()=>{try{const s=Math.min(1,900/Math.max(img.width,img.height));const c=document.createElement('canvas');
+    c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+    URL.revokeObjectURL(u);c.toBlob((b)=>ok(b),'image/jpeg',.8)}catch{ok(null)}};
+  img.onerror=()=>{URL.revokeObjectURL(u);ok(null)};img.src=u})}
+async function rawPost(url,blob,extra){
+  const r=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':blob.type||'application/octet-stream',...headers(),...extra},body:blob});
+  const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'업로드에 실패했어요.');return d}
+$('#pick').onclick=()=>{
+  if(!currentUser){say('사진을 올리려면 먼저 로그인해주세요.');$('#nick').focus();return}
+  $('#file').click()};
+$('#file').onchange=async(e)=>{
+  const files=[...e.target.files];e.target.value='';if(!files.length)return;
+  if(!currentUser){say('사진을 올리려면 먼저 로그인해주세요.');return}
+  $('#pick').disabled=true;let done=0,skipped=0;
+  try{for(const f of files){
+      if(!/^image\/(jpeg|png|webp)$/.test(f.type)||f.size>state.maxMB*1024*1024){skipped++;continue}
+      say(`업로드 중… (${done+skipped+1}/${files.length}) ${(f.size/1048576).toFixed(1)}MB`);
+      const d=await rawPost('/api/photos',f,{'X-Month':state.month});done++;
+      const t=await makeThumb(f);if(t){try{await rawPost(`/api/photos/${d.id}/thumb`,t,{})}catch{}}}
+    say(`${done}장의 사진을 보관했습니다`+(skipped?` · ${skipped}장은 형식(JPG/PNG/WEBP)이나 ${state.maxMB}MB 제한으로 건너뛰었어요`:''))}
+  catch(err){say(`${done}장 올린 뒤 멈췄어요: ${err.message}`)}
+  $('#pick').disabled=false;load()};
+
+$('#adminBtn').onclick=()=>{$('#keyInput').value='';$('#keyDlg').showModal()};
+$('#keyDlg').addEventListener('close',async()=>{
+  if($('#keyDlg').returnValue!=='ok'||!$('#keyInput').value)return;
+  try{state.admin=$('#keyInput').value;await call('/api/admin/check');sessionStorage.setItem('adminKey',state.admin);say('관리자 모드로 들어왔어요.');load()}
+  catch{state.admin='';say('관리자 키가 올바르지 않아요.')}});
+$('#logout').onclick=()=>{state.admin='';sessionStorage.removeItem('adminKey');load()};
+$('#viewer').onclick=()=>$('#viewer').close();
+
+call('/api/config').then(c=>{state.max=c.maxPerUser;state.maxMB=c.maxImageMB;$('#max').textContent=c.maxPerUser}).catch(()=>{});
+restoreLogin().finally(load);
+</script>
+</body>
+</html>
