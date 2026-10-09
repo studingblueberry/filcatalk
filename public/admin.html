@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="ko">
 <head>
@@ -14,9 +15,16 @@
     <div class="brand"><span class="mark">필</span><span>FILM PHOTO CLUB&nbsp; / &nbsp;ADMIN</span></div>
     <a class="ghost" href="/">← 사진 페이지</a>
   </div>
+
   <header class="hero">
-    <div><div class="kicker">필름사진카톡 · 관리자 페이지</div><h1>월별 순위,<br><span>이달의 TOP 3.</span></h1></div>
-    <div class="hero-note"><b>MONTHLY RANKING</b>득표수 기준 1·2·3위 사진을 한눈에 모아 보고, 달력 제작용 원본을 바로 저장할 수 있어요.</div>
+    <div>
+      <div class="kicker">필름사진카톡 · 관리자 페이지</div>
+      <h1>계절의 기록,<br><span>SEASONAL TOP 3.</span></h1>
+    </div>
+    <div class="hero-note">
+      <b>SEASONAL RANKING</b>
+      계절별로 득표수 기준 1·2·3위 사진을 확인하고, 달력 제작용 원본을 저장할 수 있어요.
+    </div>
   </header>
 
   <section class="gate" id="gate" hidden>
@@ -29,71 +37,236 @@
 
   <section id="board" hidden>
     <div class="toolbar">
-      <select id="filter" aria-label="월 필터"></select>
+      <select id="filter" aria-label="계절 필터">
+        <option value="all">전체 계절</option>
+      </select>
       <button class="ghost" id="reload" type="button">새로고침</button>
       <button class="ghost" id="logout" type="button">나가기</button>
     </div>
-    <div class="months" id="months"></div>
+    <div class="months" id="seasons"></div>
   </section>
-  <div class="bottomnote">동점이면 같은 순위로 묶여 보여요. 득표가 없는 달은 순위가 표시되지 않습니다.</div>
+
+  <div class="bottomnote">
+    동점이면 같은 순위로 묶여 보여요. 득표가 없는 계절은 순위가 표시되지 않습니다.
+  </div>
 </main>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <dialog id="viewer"><img id="big" alt=""></dialog>
 
 <script>
-const $=(s)=>document.querySelector(s);
-let key=sessionStorage.getItem('adminKey')||'',months=[],toastTimer;
-const say=(t)=>{const e=$('#toast');e.textContent=t||'';e.classList.toggle('show',!!t);clearTimeout(toastTimer);if(t)toastTimer=setTimeout(()=>e.classList.remove('show'),2800)};
-const mLabel=(m)=>`${m.slice(0,4)}년 ${+m.slice(5)}월`;
+const $ = (s) => document.querySelector(s);
 
-async function fetchRanking(){
-  const r=await fetch('/api/admin/ranking',{headers:{'X-Admin-Key':key}});
-  if(r.status===401)throw new Error('auth');
-  if(!r.ok)throw new Error('server');
-  return (await r.json()).months;
+const SEASONS = {
+  spring: { name: '봄', english: 'SPRING' },
+  summer: { name: '여름', english: 'SUMMER' },
+  autumn: { name: '가을', english: 'AUTUMN' },
+  winter: { name: '겨울', english: 'WINTER' }
+};
+
+let key = sessionStorage.getItem('adminKey') || '';
+let seasons = [];
+let toastTimer;
+
+const say = (t) => {
+  const e = $('#toast');
+  e.textContent = t || '';
+  e.classList.toggle('show', !!t);
+  clearTimeout(toastTimer);
+  if (t) toastTimer = setTimeout(() => e.classList.remove('show'), 2800);
+};
+
+function seasonName(id) {
+  return SEASONS[id]?.name || id || '계절 미지정';
 }
-async function enter(k,silent){
-  key=k;
-  try{months=await fetchRanking();sessionStorage.setItem('adminKey',key);$('#gate').hidden=true;$('#board').hidden=false;fillFilter();draw()}
-  catch(e){$('#board').hidden=true;$('#gate').hidden=false;if(e.message==='auth'){key='';sessionStorage.removeItem('adminKey');if(!silent)say('관리자 키가 올바르지 않아요.')}else say('데이터를 불러오지 못했어요.')}
+
+async function fetchRanking() {
+  const r = await fetch('/api/admin/ranking', {
+    headers: { 'X-Admin-Key': key }
+  });
+
+  if (r.status === 401) throw new Error('auth');
+  if (!r.ok) throw new Error('server');
+
+  const data = await r.json();
+
+  // 새 서버 응답: { seasons: [...] }
+  // 기존 서버 응답: { months: [...] }
+  const items = Array.isArray(data.seasons) ? data.seasons :
+                Array.isArray(data.months) ? data.months : [];
+
+  return items.map((item) => {
+    // 계절 형식이 아닌 기존 월 형식은 월 번호로 계절을 추정합니다.
+    let season = item.season;
+
+    if (!season && /^\d{4}-\d{2}$/.test(item.month || '')) {
+      const month = Number(item.month.slice(5));
+      season = month >= 3 && month <= 5 ? 'spring' :
+               month >= 6 && month <= 8 ? 'summer' :
+               month >= 9 && month <= 11 ? 'autumn' : 'winter';
+    }
+
+    return { ...item, season: season || 'spring' };
+  });
 }
-function fillFilter(){
-  const f=$('#filter'),cur=f.value;f.replaceChildren(new Option('전체 월','all'));
-  months.forEach((m)=>f.append(new Option(mLabel(m.month),m.month)));
-  f.value=months.some((m)=>m.month===cur)?cur:'all';
+
+async function enter(k, silent = false) {
+  key = k;
+
+  try {
+    seasons = await fetchRanking();
+    sessionStorage.setItem('adminKey', key);
+    $('#gate').hidden = true;
+    $('#board').hidden = false;
+    fillFilter();
+    draw();
+  } catch (e) {
+    $('#board').hidden = true;
+    $('#gate').hidden = false;
+
+    if (e.message === 'auth') {
+      key = '';
+      sessionStorage.removeItem('adminKey');
+      if (!silent) say('관리자 키가 올바르지 않아요.');
+    } else {
+      if (!silent) say('데이터를 불러오지 못했어요.');
+    }
+  }
 }
-function open(url){$('#big').src=url;$('#viewer').showModal()}
-function draw(){
-  const box=$('#months');box.replaceChildren();
-  const list=months.filter((m)=>$('#filter').value==='all'||m.month===$('#filter').value);
-  if(!list.length){const p=document.createElement('p');p.className='novote';p.textContent='아직 올라온 사진이 없어요.';box.append(p);return}
-  for(const m of list){
-    const card=document.createElement('section');card.className='mcard';
-    const head=document.createElement('div');head.className='mhead';
-    const h=document.createElement('h2');h.textContent=mLabel(m.month);
-    const sm=document.createElement('small');sm.textContent=`사진 ${m.total}장`;head.append(h,sm);card.append(head);
-    if(!m.ranks.length){const p=document.createElement('div');p.className='novote';p.textContent='아직 투표가 없어요.';card.append(p)}
-    for(const r of m.ranks){
-      const row=document.createElement('div');row.className='rank r'+r.rank;
-      const b=document.createElement('div');b.className='badge';b.textContent=r.rank+'위';
-      const s=document.createElement('small');s.textContent=r.votes+'표'+(r.photos.length>1?` · 공동 ${r.photos.length}`:'');b.append(s);
-      const ph=document.createElement('div');ph.className='rphotos';
-      for(const p of r.photos){
-        const fg=document.createElement('figure'),im=document.createElement('img'),cp=document.createElement('figcaption');
-        im.src=p.thumb;im.loading='lazy';im.alt=`${p.nickname}님의 사진`;im.onclick=()=>open(p.url);
-        const nm=document.createElement('span');nm.textContent=p.nickname;
-        const dl=document.createElement('a');dl.className='ghost';dl.href=p.url;dl.textContent='원본 저장';
-        dl.download=`${m.month}_${r.rank}위_${p.nickname}.${p.url.split('.').pop()}`;
-        cp.append(nm,dl);fg.append(im,cp);ph.append(fg)}
-      row.append(b,ph);card.append(row)}
-    box.append(card)}
+
+function fillFilter() {
+  const f = $('#filter');
+  const cur = f.value;
+
+  f.replaceChildren(new Option('전체 계절', 'all'));
+
+  ['spring', 'summer', 'autumn', 'winter'].forEach((id) => {
+    if (seasons.some((s) => s.season === id)) {
+      f.append(new Option(`${seasonName(id)} · ${SEASONS[id].english}`, id));
+    }
+  });
+
+  f.value = cur === 'all' || seasons.some((s) => s.season === cur) ? cur : 'all';
 }
-$('#filter').onchange=draw;
-$('#reload').onclick=()=>enter(key,true).then(()=>say('새로고침했어요.'));
-$('#logout').onclick=()=>{key='';sessionStorage.removeItem('adminKey');$('#board').hidden=true;$('#gate').hidden=false;$('#keyInput').value=''};
-$('#gateForm').onsubmit=(e)=>{e.preventDefault();if($('#keyInput').value)enter($('#keyInput').value)};
-$('#viewer').onclick=()=>$('#viewer').close();
-if(key)enter(key,true);else $('#gate').hidden=false;
+
+function open(url) {
+  $('#big').src = url;
+  $('#viewer').showModal();
+}
+
+function draw() {
+  const box = $('#seasons');
+  box.replaceChildren();
+
+  const selected = $('#filter').value;
+  const list = seasons.filter((s) => selected === 'all' || s.season === selected);
+
+  if (!list.length) {
+    const p = document.createElement('p');
+    p.className = 'novote';
+    p.textContent = '아직 등록된 사진이 없어요.';
+    box.append(p);
+    return;
+  }
+
+  const order = ['spring', 'summer', 'autumn', 'winter'];
+  list.sort((a, b) => order.indexOf(a.season) - order.indexOf(b.season));
+
+  for (const season of list) {
+    const card = document.createElement('section');
+    card.className = 'mcard';
+
+    const head = document.createElement('div');
+    head.className = 'mhead';
+
+    const h = document.createElement('h2');
+    h.textContent = `${seasonName(season.season)} · ${SEASONS[season.season]?.english || ''}`;
+
+    const sm = document.createElement('small');
+    sm.textContent = `사진 ${season.total ?? 0}장`;
+
+    head.append(h, sm);
+    card.append(head);
+
+    if (!season.ranks || !season.ranks.length) {
+      const p = document.createElement('div');
+      p.className = 'novote';
+      p.textContent = '아직 투표가 없어요.';
+      card.append(p);
+    }
+
+    for (const rank of (season.ranks || [])) {
+      const row = document.createElement('div');
+      row.className = 'rank r' + rank.rank;
+
+      const badge = document.createElement('div');
+      badge.className = 'badge';
+      badge.textContent = rank.rank + '위';
+
+      const voteCount = document.createElement('small');
+      voteCount.textContent = `${rank.votes}표` +
+        (rank.photos.length > 1 ? ` · 공동 ${rank.photos.length}` : '');
+      badge.append(voteCount);
+
+      const photos = document.createElement('div');
+      photos.className = 'rphotos';
+
+      for (const photo of rank.photos) {
+        const figure = document.createElement('figure');
+        const img = document.createElement('img');
+        const caption = document.createElement('figcaption');
+
+        img.src = photo.thumb || photo.url;
+        img.loading = 'lazy';
+        img.alt = `${photo.nickname}님의 사진`;
+        img.onclick = () => open(photo.url);
+
+        const nickname = document.createElement('span');
+        nickname.textContent = photo.nickname;
+
+        const download = document.createElement('a');
+        download.className = 'ghost';
+        download.href = photo.url;
+        download.textContent = '원본 저장';
+        download.download = `${season.season}_${rank.rank}위_${photo.nickname}`;
+
+        caption.append(nickname, download);
+        figure.append(img, caption);
+        photos.append(figure);
+      }
+
+      row.append(badge, photos);
+      card.append(row);
+    }
+
+    box.append(card);
+  }
+}
+
+$('#filter').onchange = draw;
+
+$('#reload').onclick = async () => {
+  await enter(key, true);
+  say('새로고침을 요청했습니다.');
+};
+
+$('#logout').onclick = () => {
+  key = '';
+  sessionStorage.removeItem('adminKey');
+  $('#board').hidden = true;
+  $('#gate').hidden = false;
+  $('#keyInput').value = '';
+};
+
+$('#gateForm').onsubmit = (e) => {
+  e.preventDefault();
+  if ($('#keyInput').value) enter($('#keyInput').value);
+};
+
+$('#viewer').onclick = () => $('#viewer').close();
+
+if (key) enter(key, true);
+else $('#gate').hidden = false;
 </script>
 </body>
 </html>
