@@ -73,7 +73,7 @@
             <button class="ghost" id="accountLogout" type="button" hidden>계정 로그아웃</button>
             <span id="signedIn" class="signed-in" hidden></span>
           </form>
-          <div class="quota">내 업로드 <b id="mine">0</b> / <span id="max">10</span> FRAMES</div>
+          <div class="quota">내 업로드 <b id="mine">0</b> / <span id="max">20</span> FRAMES</div>
         </div>
 
         <div class="page-body" id="pageBody">
@@ -125,7 +125,7 @@ const SEASONS = [
 
 const state = {
   season: 'spring',
-  max: 10,
+  max: 20,
   maxMB: 15,
   mine: 0,
   admin: sessionStorage.getItem('adminKey') || ''
