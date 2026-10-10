@@ -575,7 +575,7 @@ function urlOf(filename) {
 function adminPhoto(row) {
   return {
     id: Number(row.id),
-    month: row.photo_month || row.month || '',
+    season: row.photo_season || row.season || '',
     nickname: row.nickname,
     caption: row.caption || '',
     url: urlOf(row.filename),
@@ -584,6 +584,15 @@ function adminPhoto(row) {
     bookmarked: Boolean(row.bookmarked),
     createdAt: row.created_at,
   };
+}
+
+function adminSeasonSql(alias = 'p') {
+  return `CASE WHEN ${alias}.season IN ('spring','summer','autumn','winter') THEN ${alias}.season
+    ELSE CASE SUBSTRING(COALESCE(NULLIF(${alias}.month, ''), TO_CHAR(${alias}.created_at, 'YYYY-MM')) FROM 6 FOR 2)
+      WHEN '03' THEN 'spring' WHEN '04' THEN 'spring' WHEN '05' THEN 'spring'
+      WHEN '06' THEN 'summer' WHEN '07' THEN 'summer' WHEN '08' THEN 'summer'
+      WHEN '09' THEN 'autumn' WHEN '10' THEN 'autumn' WHEN '11' THEN 'autumn'
+      ELSE 'winter' END END`;
 }
 
 async function uploadToR2(filename, buffer, contentType) {
@@ -1203,8 +1212,7 @@ async function api(req, res, url) {
 
     if (pathname === '/api/admin/bookmarks' && method === 'GET') {
       const result = await db.query(
-        `SELECT p.id, CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
-                  ELSE TO_CHAR(p.created_at, 'YYYY-MM') END AS photo_month,
+        `SELECT p.id, ${adminSeasonSql()} AS photo_season,
           p.nickname, p.caption, p.filename, p.thumb,
           p.created_at,
           TRUE AS bookmarked,
@@ -1237,18 +1245,16 @@ async function api(req, res, url) {
     }
 
     if (pathname === '/api/admin/photos' && method === 'GET') {
-      const month = url.searchParams.get('month');
-      if (!validMonth(month)) return send(res, 400, { error: '올바른 월이 아닙니다.' });
+      const season = url.searchParams.get('season');
+      if (!validSeason(season)) return send(res, 400, { error: '올바른 계절이 아닙니다.' });
       const result = await db.query(
-        `SELECT p.id, CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
-                  ELSE TO_CHAR(p.created_at, 'YYYY-MM') END AS photo_month,
+        `SELECT p.id, ${adminSeasonSql()} AS photo_season,
           p.nickname, p.caption, p.filename, p.thumb, p.created_at,
           (SELECT COUNT(*)::int FROM votes v WHERE v.photo_id = p.id) AS votes,
           EXISTS(SELECT 1 FROM admin_bookmarks b WHERE b.photo_id = p.id) AS bookmarked
          FROM photos p
-         WHERE CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
-                    ELSE TO_CHAR(p.created_at, 'YYYY-MM') END = $1
-         ORDER BY votes DESC, p.id DESC`, [month]
+         WHERE ${adminSeasonSql()} = $1
+         ORDER BY votes DESC, p.id DESC`, [season]
       );
       return send(res, 200, { photos: result.rows.map(adminPhoto) });
     }
@@ -1276,19 +1282,19 @@ async function api(req, res, url) {
     if (pathname === '/api/admin/ranking' && method === 'GET') {
       const result = await db.query(
         `SELECT p.id,
-          CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
-               ELSE TO_CHAR(p.created_at, 'YYYY-MM') END AS photo_month,
+          ${adminSeasonSql()} AS photo_season,
           p.nickname, p.caption, p.filename, p.thumb, p.created_at,
           (SELECT COUNT(*)::int FROM votes v WHERE v.photo_id = p.id) AS votes,
           EXISTS(SELECT 1 FROM admin_bookmarks b WHERE b.photo_id = p.id) AS bookmarked
          FROM photos p
-         ORDER BY photo_month DESC, votes DESC, p.id DESC`
+         ORDER BY CASE photo_season WHEN 'spring' THEN 1 WHEN 'summer' THEN 2 WHEN 'autumn' THEN 3 ELSE 4 END, votes DESC, p.id DESC`
       );
       const byMonth = new Map();
       for (const row of result.rows) {
-        const month = row.photo_month;
-        if (!byMonth.has(month)) byMonth.set(month, { month, total: 0, ranks: [], photos: [] });
-        const group = byMonth.get(month);
+        const season = row.photo_season;
+        if (!validSeason(season)) continue;
+        if (!byMonth.has(season)) byMonth.set(season, { season, total: 0, ranks: [], photos: [] });
+        const group = byMonth.get(season);
         const photo = adminPhoto(row);
         group.total++;
         group.photos.push(photo);
@@ -1301,7 +1307,7 @@ async function api(req, res, url) {
         }
         if (rank) rank.photos.push(photo);
       }
-      return send(res, 200, { months: [...byMonth.values()] });
+      return send(res, 200, { seasons: [...byMonth.values()] });
     }
   }
 
