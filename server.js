@@ -25,7 +25,7 @@ const {
 
 const PORT = Number(process.env.PORT || 3000);
 const MAX_PER_USER = Number(process.env.MAX_PER_USER || 20);
-const MAX_IMAGE_MB = Number(process.env.MAX_IMAGE_MB || 15);
+const MAX_IMAGE_MB = Number(process.env.MAX_IMAGE_MB || 20);
 const MAX_BYTES = MAX_IMAGE_MB * 1024 * 1024;
 
 const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
