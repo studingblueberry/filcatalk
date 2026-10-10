@@ -15,6 +15,7 @@ const { Pool } = require('pg');
 const {
   S3Client,
   PutObjectCommand,
+  GetObjectCommand,
   DeleteObjectCommand,
 } = require('@aws-sdk/client-s3');
 
@@ -224,6 +225,13 @@ async function initializeDatabase() {
       voter_id TEXT NOT NULL,
       created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (photo_id, voter_id)
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS admin_bookmarks (
+      photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
 
@@ -562,6 +570,20 @@ function urlOf(filename) {
     '/' +
     encodeURIComponent(filename)
   );
+}
+
+function adminPhoto(row) {
+  return {
+    id: Number(row.id),
+    month: row.photo_month || row.month || '',
+    nickname: row.nickname,
+    caption: row.caption || '',
+    url: urlOf(row.filename),
+    thumb: row.thumb ? urlOf(row.thumb) : urlOf(row.filename),
+    votes: Number(row.votes || 0),
+    bookmarked: Boolean(row.bookmarked),
+    createdAt: row.created_at,
+  };
 }
 
 async function uploadToR2(filename, buffer, contentType) {
@@ -1171,112 +1193,116 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true });
   }
 
-  // ----------------------------------------------------------
-  // 관리자 랭킹: 계절별 집계
-  // 응답은 seasons 배열과 구형 프론트엔드용 months 배열을 함께 제공
-  // ----------------------------------------------------------
-
-  if (pathname === '/api/admin/ranking' && method === 'GET') {
+  // 관리자 사진 목록과 북마크는 모두 PostgreSQL에 보관합니다.
+  if (pathname.startsWith('/api/admin/')) {
     if (!isAdmin(req)) {
       return send(res, 401, {
         error: '관리자 키가 필요해요.',
       });
     }
 
-    const result = await db.query(
-      `
-      SELECT
-        p.id,
-        p.season,
-        p.month,
-        p.nickname,
-        p.caption,
-        p.filename,
-        p.thumb,
-        (
-          SELECT COUNT(*)
-          FROM votes v
-          WHERE v.photo_id = p.id
-        ) AS votes
-      FROM photos p
-      ORDER BY
-        CASE p.season
-          WHEN 'spring' THEN 1
-          WHEN 'summer' THEN 2
-          WHEN 'autumn' THEN 3
-          WHEN 'winter' THEN 4
-          ELSE 5
-        END,
-        votes DESC,
-        p.id
-      `
-    );
-
-    const bySeason = new Map();
-
-    for (const row of result.rows) {
-      // 계절이 아직 지정되지 않은 잘못된/미변환 데이터는 제외
-      if (!validSeason(row.season)) continue;
-
-      let group = bySeason.get(row.season);
-
-      if (!group) {
-        group = {
-          season: row.season,
-          total: 0,
-          ranks: [],
-        };
-
-        bySeason.set(row.season, group);
-      }
-
-      group.total++;
-
-      const votes = Number(row.votes);
-
-      if (votes > 0) {
-        let rank = group.ranks.find(
-          (item) => item.votes === votes
-        );
-
-        if (!rank && group.ranks.length < 3) {
-          rank = {
-            rank: group.ranks.length + 1,
-            votes,
-            photos: [],
-          };
-
-          group.ranks.push(rank);
-        }
-
-        if (rank) {
-          rank.photos.push({
-            id: Number(row.id),
-            nickname: row.nickname,
-            caption: row.caption,
-            url: urlOf(row.filename),
-            thumb: row.thumb
-              ? urlOf(row.thumb)
-              : urlOf(row.filename),
-            votes,
-          });
-        }
-      }
+    if (pathname === '/api/admin/bookmarks' && method === 'GET') {
+      const result = await db.query(
+        `SELECT p.id, CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
+                  ELSE TO_CHAR(p.created_at, 'YYYY-MM') END AS photo_month,
+          p.nickname, p.caption, p.filename, p.thumb,
+          p.created_at,
+          TRUE AS bookmarked,
+          (SELECT COUNT(*)::int FROM votes v WHERE v.photo_id = p.id) AS votes
+         FROM photos p JOIN admin_bookmarks b ON b.photo_id = p.id
+         ORDER BY b.created_at DESC, p.id DESC`
+      );
+      return send(res, 200, { photos: result.rows.map(adminPhoto) });
     }
 
-    const seasons = [...bySeason.values()];
+    if (pathname === '/api/admin/bookmarks' && method === 'POST') {
+      const body = await readJson(req);
+      const id = Number(body.photoId);
+      if (!Number.isSafeInteger(id) || id < 1) {
+        return send(res, 400, { error: '사진 정보가 올바르지 않아요.' });
+      }
+      const saved = await db.query(
+        `INSERT INTO admin_bookmarks(photo_id) SELECT id FROM photos WHERE id = $1
+         ON CONFLICT(photo_id) DO NOTHING RETURNING photo_id`, [id]
+      );
+      if (!saved.rowCount && !(await db.query('SELECT 1 FROM photos WHERE id = $1', [id])).rowCount) {
+        return send(res, 404, { error: '사진을 찾을 수 없어요.' });
+      }
+      return send(res, 200, { bookmarked: true });
+    }
 
-    // 이전 관리자 페이지가 months/month를 읽는 경우를 위한 임시 호환.
-    // 월별 데이터가 아니라 계절별 그룹이다.
-    const months = seasons.map((group) => ({
-      ...group,
-      month: group.season,
-    }));
+    if ((match = /^\/api\/admin\/bookmarks\/(\d+)$/.exec(pathname)) && method === 'DELETE') {
+      await db.query('DELETE FROM admin_bookmarks WHERE photo_id = $1', [Number(match[1])]);
+      return send(res, 200, { bookmarked: false });
+    }
 
-    return send(res, 200, {
-      seasons,
-      months,
-    });
+    if (pathname === '/api/admin/photos' && method === 'GET') {
+      const month = url.searchParams.get('month');
+      if (!validMonth(month)) return send(res, 400, { error: '올바른 월이 아닙니다.' });
+      const result = await db.query(
+        `SELECT p.id, CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
+                  ELSE TO_CHAR(p.created_at, 'YYYY-MM') END AS photo_month,
+          p.nickname, p.caption, p.filename, p.thumb, p.created_at,
+          (SELECT COUNT(*)::int FROM votes v WHERE v.photo_id = p.id) AS votes,
+          EXISTS(SELECT 1 FROM admin_bookmarks b WHERE b.photo_id = p.id) AS bookmarked
+         FROM photos p
+         WHERE CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
+                    ELSE TO_CHAR(p.created_at, 'YYYY-MM') END = $1
+         ORDER BY votes DESC, p.id DESC`, [month]
+      );
+      return send(res, 200, { photos: result.rows.map(adminPhoto) });
+    }
+
+    if ((match = /^\/api\/admin\/photos\/(\d+)\/download$/.exec(pathname)) && method === 'GET') {
+      const photo = (await db.query('SELECT filename FROM photos WHERE id = $1', [Number(match[1])])).rows[0];
+      if (!photo) return send(res, 404, { error: '사진을 찾을 수 없어요.' });
+      const object = await r2.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: photo.filename }));
+      const safeName = `filcatalk_${Number(match[1])}${path.extname(photo.filename).toLowerCase()}`;
+      res.writeHead(200, {
+        'Content-Type': contentTypeFor(path.extname(photo.filename).slice(1)),
+        'Content-Disposition': `attachment; filename="${safeName}"`,
+        'Cache-Control': 'private, no-store',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      object.Body.on('error', (error) => {
+        console.error('R2 원본 다운로드 실패:', error);
+        if (!res.headersSent) send(res, 502, { error: '원본을 내려받지 못했어요.' });
+        else res.destroy(error);
+      });
+      object.Body.pipe(res);
+      return;
+    }
+
+    if (pathname === '/api/admin/ranking' && method === 'GET') {
+      const result = await db.query(
+        `SELECT p.id,
+          CASE WHEN p.month ~ '^\\d{4}-(0[1-9]|1[0-2])$' THEN p.month
+               ELSE TO_CHAR(p.created_at, 'YYYY-MM') END AS photo_month,
+          p.nickname, p.caption, p.filename, p.thumb, p.created_at,
+          (SELECT COUNT(*)::int FROM votes v WHERE v.photo_id = p.id) AS votes,
+          EXISTS(SELECT 1 FROM admin_bookmarks b WHERE b.photo_id = p.id) AS bookmarked
+         FROM photos p
+         ORDER BY photo_month DESC, votes DESC, p.id DESC`
+      );
+      const byMonth = new Map();
+      for (const row of result.rows) {
+        const month = row.photo_month;
+        if (!byMonth.has(month)) byMonth.set(month, { month, total: 0, ranks: [], photos: [] });
+        const group = byMonth.get(month);
+        const photo = adminPhoto(row);
+        group.total++;
+        group.photos.push(photo);
+        const votes = Number(row.votes);
+        if (votes < 1) continue;
+        let rank = group.ranks.find((item) => item.votes === votes);
+        if (!rank && group.ranks.length < 3) {
+          rank = { rank: group.ranks.length + 1, votes, photos: [] };
+          group.ranks.push(rank);
+        }
+        if (rank) rank.photos.push(photo);
+      }
+      return send(res, 200, { months: [...byMonth.values()] });
+    }
   }
 
   return send(res, 404, {

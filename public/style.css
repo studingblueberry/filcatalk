@@ -928,3 +928,21 @@ dialog.key div { display: flex; gap: 8px; }
 }
 
 #progressText { white-space: nowrap; }
+
+/* 관리자 월별 아카이브 */
+.admin-month-label{font:10px 'IBM Plex Mono',monospace;color:var(--muted)}
+.admin-tabs{display:flex;gap:6px;flex-wrap:wrap}
+.admin-content{display:grid;gap:16px}
+.admin-section-title{display:flex;justify-content:space-between;align-items:baseline;gap:12px;border-bottom:1px solid var(--line);padding:0 2px 10px}
+.admin-section-title h2{margin:0;font:800 23px 'Nanum Myeongjo',serif}
+.admin-section-title small{font:10px 'IBM Plex Mono',monospace;color:var(--muted)}
+.admin-gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
+.admin-photo{min-width:0;background:var(--cream);border:1px solid var(--line);padding:8px;box-shadow:0 5px 14px #56462b12}
+.admin-photo>img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;cursor:zoom-in;background:#d7c9a6}
+.admin-photo-meta{display:grid;grid-template-columns:1fr auto;gap:4px 8px;padding:8px 2px 2px;align-items:center}
+.admin-photo-meta strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.admin-photo-meta small{font:9px 'IBM Plex Mono',monospace;color:var(--muted);white-space:nowrap}
+.admin-photo-actions{grid-column:1/-1;display:flex;gap:6px;margin-top:3px}
+.admin-photo-actions .ghost{flex:1;text-align:center;padding:7px 4px;font-size:9px}
+.admin-content .mcard .admin-gallery{margin-top:8px}
+@media(max-width:800px){.admin-tabs{order:3;width:100%}.admin-tabs .ghost{flex:1;padding:10px 5px}.admin-gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.admin-photo{padding:5px}.admin-photo-actions{flex-direction:column}}
