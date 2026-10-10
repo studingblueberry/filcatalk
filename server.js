@@ -1287,7 +1287,10 @@ async function api(req, res, url) {
           (SELECT COUNT(*)::int FROM votes v WHERE v.photo_id = p.id) AS votes,
           EXISTS(SELECT 1 FROM admin_bookmarks b WHERE b.photo_id = p.id) AS bookmarked
          FROM photos p
-         ORDER BY CASE photo_season WHEN 'spring' THEN 1 WHEN 'summer' THEN 2 WHEN 'autumn' THEN 3 ELSE 4 END, votes DESC, p.id DESC`
+         ORDER BY CASE ${adminSeasonSql()}
+           WHEN 'spring' THEN 1 WHEN 'summer' THEN 2
+           WHEN 'autumn' THEN 3 ELSE 4 END,
+           votes DESC, p.id DESC`
       );
       const byMonth = new Map();
       for (const row of result.rows) {
