@@ -946,3 +946,18 @@ dialog.key div { display: flex; gap: 8px; }
 .admin-photo-actions .ghost{flex:1;text-align:center;padding:7px 4px;font-size:9px}
 .admin-content .mcard .admin-gallery{margin-top:8px}
 @media(max-width:800px){.admin-tabs{order:3;width:100%}.admin-tabs .ghost{flex:1;padding:10px 5px}.admin-gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.admin-photo{padding:5px}.admin-photo-actions{flex-direction:column}}
+.season-switcher{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 18px}
+.season-button{display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid #bcae89;background:var(--cream);color:#685f4b;padding:10px 14px;font:700 15px 'Nanum Myeongjo',serif}
+.season-button small{font:9px 'IBM Plex Mono',monospace;letter-spacing:.08em;color:var(--muted)}
+.season-button:hover{border-color:var(--red)}
+.season-button.active{background:var(--red);border-color:var(--red);color:#fff0d3;box-shadow:2px 3px 0 #713528}
+.season-button.active small{color:#f3d7bd}
+.uploader-table-wrap{overflow-x:auto;background:var(--cream);border:1px solid #9b8e6c;padding:8px;box-shadow:0 10px 24px #56462b1c,inset 0 0 0 3px #f1e9d5}
+.uploader-table{width:100%;border-collapse:collapse;text-align:center;font-size:13px}
+.uploader-table th,.uploader-table td{padding:12px 10px;border-bottom:1px solid var(--line)}
+.uploader-table th{font:10px 'IBM Plex Mono',monospace;color:var(--muted);letter-spacing:.06em}
+.uploader-table tbody tr:last-child td{border-bottom:0}
+.uploader-table tbody tr:hover{background:#eee5c9}
+.uploader-table td.uploader-name{text-align:left;font-weight:700}
+.uploader-table td:nth-child(2){color:var(--red);font-weight:700}
+@media(max-width:600px){.season-switcher{gap:5px}.season-button{padding:9px 6px;justify-content:center;flex-direction:column;font-size:14px}.uploader-table th,.uploader-table td{padding:10px 7px;font-size:11px}}

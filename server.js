@@ -1259,6 +1259,23 @@ async function api(req, res, url) {
       return send(res, 200, { photos: result.rows.map(adminPhoto) });
     }
 
+    if (pathname === '/api/admin/uploaders' && method === 'GET') {
+      const seasonExpr = adminSeasonSql();
+      const result = await db.query(
+        `SELECT COALESCE(NULLIF(p.owner_id, ''), 'legacy:' || p.nick_key) AS uploader_id,
+          MAX(p.nickname) AS nickname,
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE ${seasonExpr} = 'spring')::int AS spring,
+          COUNT(*) FILTER (WHERE ${seasonExpr} = 'summer')::int AS summer,
+          COUNT(*) FILTER (WHERE ${seasonExpr} = 'autumn')::int AS autumn,
+          COUNT(*) FILTER (WHERE ${seasonExpr} = 'winter')::int AS winter
+         FROM photos p
+         GROUP BY COALESCE(NULLIF(p.owner_id, ''), 'legacy:' || p.nick_key)
+         ORDER BY total DESC, nickname ASC`
+      );
+      return send(res, 200, { uploaders: result.rows });
+    }
+
     if ((match = /^\/api\/admin\/photos\/(\d+)\/download$/.exec(pathname)) && method === 'GET') {
       const photo = (await db.query('SELECT filename FROM photos WHERE id = $1', [Number(match[1])])).rows[0];
       if (!photo) return send(res, 404, { error: '사진을 찾을 수 없어요.' });
